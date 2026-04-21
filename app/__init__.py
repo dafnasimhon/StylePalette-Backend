@@ -1,0 +1,1 @@
+"""StylePalette FastAPI application package."""
