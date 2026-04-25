@@ -1,29 +1,178 @@
-from fastapi import UploadFile
+from __future__ import annotations
+
+import asyncio
+import re
+from typing import Any, Sequence, Tuple, Union
+
+import cv2
+import numpy as np
+from fastapi import HTTPException, UploadFile
 
 from app.config import Settings, get_settings
+from app.cv.facial_color_analysis import analyze_facial_colors, load_image_bgr_from_bytes
 from app.domain.enums import EyeColor, HairColor, Season, SkinType
 from app.domain.style_palettes import StylePalettes
-from app.schemas.analysis import AnalysisResult, PaletteColor, SeasonPalette, TraitEstimate
+from app.schemas.analysis import AnalysisResult, ColorMeasurement, PaletteColor, SeasonPalette, TraitEstimate
 from app.services.season_analyzer import SeasonAnalyzer
+
+# ---------------------------------------------------------------------------
+# Color parsing & trait classification (inlined; no clothing_palette import)
+# ---------------------------------------------------------------------------
+
+_HEX_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
+
+
+def _parse_hex(hex_str: str) -> Tuple[int, int, int]:
+    m = _HEX_RE.match(hex_str.strip())
+    if not m:
+        raise ValueError(f"Invalid hex color: {hex_str!r}")
+    h = m.group(1)
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _to_rgb(value: Union[str, Sequence[int], dict[str, Any]]) -> Tuple[int, int, int]:
+    if isinstance(value, str):
+        return _parse_hex(value)
+    if isinstance(value, dict):
+        if "rgb" in value:
+            seq = value["rgb"]
+            if not isinstance(seq, (list, tuple)) or len(seq) != 3:
+                raise ValueError("'rgb' must be a length-3 sequence")
+            return int(seq[0]), int(seq[1]), int(seq[2])
+        if "hex" in value:
+            return _parse_hex(str(value["hex"]))
+        raise ValueError("Mapping must include 'rgb' or 'hex'")
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) == 3:
+        return int(value[0]), int(value[1]), int(value[2])
+    raise TypeError("Unsupported color input")
+
+
+def _relative_luminance(rgb: Tuple[int, int, int]) -> float:
+    def lin(c: int) -> float:
+        x = c / 255.0
+        return x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4
+
+    r, g, b = rgb
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+
+def _undertone_is_warm(skin_rgb: Tuple[int, int, int]) -> bool | None:
+    r, g, b = skin_rgb
+    delta_rb = r - b
+    if delta_rb >= 18:
+        return True
+    if delta_rb <= -12:
+        return False
+    return None
+
+
+def _bgr_hsv1(rgb: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Single-pixel HSV in OpenCV ranges (H 0–179, S/V 0–255)."""
+    r, g, b_ = rgb
+    bgr = np.uint8([[[b_, g, r]]])
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[0, 0]
+    return int(hsv[0]), int(hsv[1]), int(hsv[2])
+
+
+def classify_skin_tone_from_rgb(skin_rgb: Tuple[int, int, int]) -> str:
+    lum = _relative_luminance(skin_rgb)
+    if lum >= 0.78:
+        return "Very Fair"
+    if lum >= 0.55:
+        return "Fair"
+    if lum >= 0.32:
+        return "Medium/Tan"
+    return "Dark"
+
+
+def classify_hair_color_from_rgb(hair_rgb: Tuple[int, int, int]) -> str:
+    h, s, v = _bgr_hsv1(hair_rgb)
+    s_f = s / 255.0
+    v_f = v / 255.0
+    r, g, b_ = (c / 255.0 for c in hair_rgb)
+
+    if v_f < 0.18 and s_f < 0.5:
+        return "Black"
+    if v_f < 0.12:
+        return "Black"
+
+    is_red_hue = h <= 20 or h >= 165
+    if is_red_hue and s_f > 0.28 and v_f < 0.75:
+        if r > g * 0.95 or (r > 0.35 and (r - b_) > 0.05):
+            return "Red/Ginger"
+
+    if v_f > 0.5 and s_f < 0.45 and 12 <= h <= 60:
+        return "Blonde"
+    if v_f > 0.62 and s_f < 0.4 and 8 <= h <= 50:
+        return "Blonde"
+
+    if v_f < 0.25:
+        return "Black"
+
+    return "Brown"
+
+
+def classify_eye_color_from_rgb(eye_rgb: Tuple[int, int, int]) -> str:
+    r, g, b_ = eye_rgb
+    h, s, v = _bgr_hsv1(eye_rgb)
+    s_f = s / 255.0
+    b_f = b_ / 255.0
+    g_f = g / 255.0
+    r_f = r / 255.0
+
+    if b_f >= r_f + 0.06 and b_f >= g_f + 0.04 and s_f > 0.12:
+        return "Blue"
+    if b_ > 95 and b_ > r and b_ > g and (b_ - max(r, g)) > 8:
+        return "Blue"
+
+    if g_f > r_f + 0.05 and g_f > b_f + 0.02 and 35 <= h <= 100 and s_f > 0.15:
+        return "Green"
+    if g > r and g > b_ and (g - max(r, b_)) > 10 and 40 < h < 100:
+        return "Green"
+
+    return "Brown"
 
 
 class AnalysisService:
-    """Wraps the Smart Diagnosis pipeline. Replace `_mock_analyze` with partner CV integration."""
+    """Wraps the Smart Diagnosis pipeline (MediaPipe + OpenCV facial color analysis)."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
 
     async def analyze_selfie(self, image: UploadFile) -> AnalysisResult:
-        _ = await image.read()
-        if self._settings.use_mock_analysis:
-            return self._mock_analyze()
-        # Partner integration: call OpenCV/Mediapipe pipeline here and map output to AnalysisResult.
-        raise NotImplementedError("Wire CV engine or set USE_MOCK_ANALYSIS=true")
+        data = await image.read()
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(None, self._analyze_facial_from_bytes, data)
+        except ValueError as err:
+            raise HTTPException(status_code=422, detail=str(err)) from err
 
-    def _mock_analyze(self) -> AnalysisResult:
-        skin = SkinType.FAIR
-        hair = HairColor.BROWN
-        eyes = EyeColor.BROWN
+    def _analyze_facial_from_bytes(self, data: bytes) -> AnalysisResult:
+        bgr = load_image_bgr_from_bytes(data)
+        raw = analyze_facial_colors(
+            bgr,
+            allow_model_download=self._settings.mediapipe_allow_model_download,
+        )
+        if not raw.get("success"):
+            raise ValueError(raw.get("error") or "Face analysis failed.")
+
+        skin_blob = raw["skin_tone"]
+        eye_blob = raw["eye_color"]
+        hair_blob = raw["hair_color"]
+        if not skin_blob or not eye_blob or not hair_blob:
+            raise ValueError("Incomplete color samples from the pipeline.")
+
+        sr, sg, sb = (int(x) for x in skin_blob["rgb"])
+        er, eg, eb = (int(x) for x in eye_blob["rgb"])
+        hr, hg, hb = (int(x) for x in hair_blob["rgb"])
+
+        skin_label = classify_skin_tone_from_rgb((sr, sg, sb))
+        eye_label = classify_eye_color_from_rgb((er, eg, eb))
+        hair_label = classify_hair_color_from_rgb((hr, hg, hb))
+
+        skin = self._to_skin_type(skin_label)
+        eyes = self._to_eye_color(eye_label)
+        hair = self._to_hair_color(hair_label)
         seasonal_palette = self._classify_season(skin=skin, hair=hair, eyes=eyes)
         season_palette = self._get_palette_recommendation(seasonal_palette)
 
@@ -33,17 +182,19 @@ class AnalysisService:
                 skin_tone=skin.value,
                 eye_color=eyes.value,
                 hair_color=hair.value,
+                skin_sample=ColorMeasurement(hex=skin_blob["hex"], rgb=list(skin_blob["rgb"])),
+                eye_sample=ColorMeasurement(hex=eye_blob["hex"], rgb=list(eye_blob["rgb"])),
+                hair_sample=ColorMeasurement(hex=hair_blob["hex"], rgb=list(hair_blob["rgb"])),
             ),
-            confidence=0.0,
+            confidence=0.82,
             palette_recommendation=season_palette,
-            notes="Mock response; replace with real CV output when integrated.",
+            notes=(
+                "Facial color analysis: MediaPipe Face Landmarker + HSV multi-zone sampling; "
+                "traits from measured RGB."
+            ),
         )
 
     def classify_from_traits(self, skin_tone: str, hair_color: str, eye_color: str) -> str:
-        """
-        Convert CV trait labels to enums and return the season name.
-        Use this once partner output is available.
-        """
         skin = self._to_skin_type(skin_tone)
         hair = self._to_hair_color(hair_color)
         eyes = self._to_eye_color(eye_color)

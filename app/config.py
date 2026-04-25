@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
-    use_mock_analysis: bool = True
+    mediapipe_allow_model_download: bool = True
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -1,10 +1,28 @@
 from pydantic import BaseModel, Field
 
 
+class ColorMeasurement(BaseModel):
+    """Measured sample (hex + RGB) from the CV pipeline."""
+
+    hex: str = Field(..., description="CSS-style hex, e.g. #aabbcc")
+    rgb: list[int] = Field(
+        ..., min_length=3, max_length=3, description="RGB 0–255 as [R, G, B]"
+    )
+
+
 class TraitEstimate(BaseModel):
     skin_tone: str | None = Field(None, description="Estimated skin tone category")
     eye_color: str | None = Field(None, description="Estimated eye color")
     hair_color: str | None = Field(None, description="Estimated hair color")
+    skin_sample: ColorMeasurement | None = Field(
+        None, description="Raw measured skin color from the image"
+    )
+    eye_sample: ColorMeasurement | None = Field(
+        None, description="Raw measured eye region color from the image"
+    )
+    hair_sample: ColorMeasurement | None = Field(
+        None, description="Raw measured hair color from the image"
+    )
 
 
 class PaletteColor(BaseModel):
@@ -30,5 +48,5 @@ class AnalysisResult(BaseModel):
     palette_recommendation: SeasonPalette
     notes: str | None = Field(
         None,
-        description="Optional message when analysis is mocked or degraded",
+        description="Optional message with analysis context or notes",
     )
