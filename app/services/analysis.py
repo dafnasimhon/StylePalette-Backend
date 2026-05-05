@@ -12,7 +12,15 @@ from app.config import Settings, get_settings
 from app.cv.facial_color_analysis import analyze_facial_colors, load_image_bgr_from_bytes
 from app.domain.enums import EyeColor, HairColor, Season, SkinType
 from app.domain.style_palettes import StylePalettes
-from app.schemas.analysis import AnalysisResult, ColorMeasurement, PaletteColor, SeasonPalette, TraitEstimate
+from app.schemas.analysis import (
+    AnalysisResult,
+    ColorMeasurement,
+    PaletteColor,
+    RgbRange,
+    SeasonPalette,
+    TraitCorrectionRequest,
+    TraitEstimate,
+)
 from app.services.season_analyzer import SeasonAnalyzer
 
 # ---------------------------------------------------------------------------
@@ -39,9 +47,7 @@ def _to_rgb(value: Union[str, Sequence[int], dict[str, Any]]) -> Tuple[int, int,
             if not isinstance(seq, (list, tuple)) or len(seq) != 3:
                 raise ValueError("'rgb' must be a length-3 sequence")
             return int(seq[0]), int(seq[1]), int(seq[2])
-        if "hex" in value:
-            return _parse_hex(str(value["hex"]))
-        raise ValueError("Mapping must include 'rgb' or 'hex'")
+        raise ValueError("Mapping must include 'rgb'")
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) == 3:
         return int(value[0]), int(value[1]), int(value[2])
     raise TypeError("Unsupported color input")
@@ -182,9 +188,9 @@ class AnalysisService:
                 skin_tone=skin.value,
                 eye_color=eyes.value,
                 hair_color=hair.value,
-                skin_sample=ColorMeasurement(hex=skin_blob["hex"], rgb=list(skin_blob["rgb"])),
-                eye_sample=ColorMeasurement(hex=eye_blob["hex"], rgb=list(eye_blob["rgb"])),
-                hair_sample=ColorMeasurement(hex=hair_blob["hex"], rgb=list(hair_blob["rgb"])),
+                skin_sample=ColorMeasurement(rgb=list(skin_blob["rgb"])),
+                eye_sample=ColorMeasurement(rgb=list(eye_blob["rgb"])),
+                hair_sample=ColorMeasurement(rgb=list(hair_blob["rgb"])),
             ),
             confidence=0.82,
             palette_recommendation=season_palette,
@@ -199,6 +205,27 @@ class AnalysisService:
         hair = self._to_hair_color(hair_color)
         eyes = self._to_eye_color(eye_color)
         return self._classify_season(skin=skin, hair=hair, eyes=eyes)
+
+    def build_palette_from_traits(self, body: TraitCorrectionRequest) -> AnalysisResult:
+        """Season + palette from user-corrected trait labels (optionally echo measured RGB)."""
+        seasonal_palette = self.classify_from_traits(
+            body.skin_tone, body.hair_color, body.eye_color
+        )
+        season_palette = self._get_palette_recommendation(seasonal_palette)
+        return AnalysisResult(
+            seasonal_palette=seasonal_palette,
+            traits=TraitEstimate(
+                skin_tone=body.skin_tone,
+                eye_color=body.eye_color,
+                hair_color=body.hair_color,
+                skin_sample=body.skin_sample,
+                eye_sample=body.eye_sample,
+                hair_sample=body.hair_sample,
+            ),
+            confidence=None,
+            palette_recommendation=season_palette,
+            notes="Palette derived from user-confirmed skin, eye, and hair traits.",
+        )
 
     @staticmethod
     def _classify_season(skin: SkinType, hair: HairColor, eyes: EyeColor) -> str:
@@ -215,10 +242,17 @@ class AnalysisService:
         }
         season_enum = season_mapping[seasonal_palette]
         palette = StylePalettes.get_palette(season_enum)
+
+        def _pc(item: dict[str, Any]) -> PaletteColor:
+            rr = item["rgb_range"]
+            return PaletteColor(
+                rgb_range=RgbRange(rgb_min=list(rr["rgb_min"]), rgb_max=list(rr["rgb_max"]))
+            )
+
         return SeasonPalette(
             description=palette["description"],
-            power_colors=[PaletteColor(**item) for item in palette["power_colors"]],
-            neutral_colors=[PaletteColor(**item) for item in palette["neutral_colors"]],
+            power_colors=[_pc(item) for item in palette["power_colors"]],
+            neutral_colors=[_pc(item) for item in palette["neutral_colors"]],
         )
 
     @staticmethod

@@ -2,9 +2,8 @@ from pydantic import BaseModel, Field
 
 
 class ColorMeasurement(BaseModel):
-    """Measured sample (hex + RGB) from the CV pipeline."""
+    """Measured sample from the CV pipeline (single sRGB point)."""
 
-    hex: str = Field(..., description="CSS-style hex, e.g. #aabbcc")
     rgb: list[int] = Field(
         ..., min_length=3, max_length=3, description="RGB 0–255 as [R, G, B]"
     )
@@ -25,9 +24,22 @@ class TraitEstimate(BaseModel):
     )
 
 
+class RgbRange(BaseModel):
+    """Inclusive RGB bounds (0–255) for a recommended palette color."""
+
+    rgb_min: list[int] = Field(
+        ..., min_length=3, max_length=3, description="Lower bound [R, G, B]"
+    )
+    rgb_max: list[int] = Field(
+        ..., min_length=3, max_length=3, description="Upper bound [R, G, B]"
+    )
+
+
 class PaletteColor(BaseModel):
-    name: str
-    hex: str
+    rgb_range: RgbRange = Field(
+        ...,
+        description="Suggested wearable inclusive RGB bounds",
+    )
 
 
 class SeasonPalette(BaseModel):
@@ -50,3 +62,22 @@ class AnalysisResult(BaseModel):
         None,
         description="Optional message with analysis context or notes",
     )
+
+
+class TraitCorrectionRequest(BaseModel):
+    """User-confirmed trait labels after selfie analysis (must match server enum labels)."""
+
+    skin_tone: str = Field(
+        ...,
+        description='One of: "Very Fair", "Fair", "Medium/Tan", "Dark"',
+    )
+    eye_color: str = Field(..., description='One of: "Brown", "Blue", "Green"')
+    hair_color: str = Field(
+        ...,
+        description='One of: "Black", "Brown", "Blonde", "Red/Ginger"',
+    )
+    skin_sample: ColorMeasurement | None = Field(
+        None, description="Optional measured RGB from the selfie to echo in the response"
+    )
+    eye_sample: ColorMeasurement | None = None
+    hair_sample: ColorMeasurement | None = None
