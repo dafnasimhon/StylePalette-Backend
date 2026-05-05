@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class ColorMeasurement(BaseModel):
@@ -7,6 +7,13 @@ class ColorMeasurement(BaseModel):
     rgb: list[int] = Field(
         ..., min_length=3, max_length=3, description="RGB 0–255 as [R, G, B]"
     )
+
+    @computed_field
+    @property
+    def hex(self) -> str:
+        """Same color as rgb, lowercase ``#rrggbb``."""
+        r, g, b = (int(x) for x in self.rgb)
+        return f"#{r:02x}{g:02x}{b:02x}"
 
 
 class TraitEstimate(BaseModel):
