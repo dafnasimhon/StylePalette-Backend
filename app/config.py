@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     mediapipe_allow_model_download: bool = True
+    #: Optional absolute path to face_landmarker.task (env MEDIAPIPE_FACE_LANDMARKER_MODEL).
+    mediapipe_face_landmarker_model: str = ""
+    #: Optional override download URL (env MEDIAPIPE_FACE_LANDMARKER_URL).
+    mediapipe_face_landmarker_url: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

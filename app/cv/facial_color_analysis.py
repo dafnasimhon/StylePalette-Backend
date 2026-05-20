@@ -24,12 +24,10 @@ def analyze_facial_colors(
 ) -> Dict[str, Any]:
     """Run face landmarks + skin / iris / hair color sampling.
 
-    ``allow_model_download`` is accepted for API compatibility with the backend
-    settings; the Tasks face landmarker loads from a local ``.task`` file.
+    ``allow_model_download``: when true and the MediaPipe ``.task`` file is missing,
+    it is downloaded once (see ``app/cv/detection.py`` and ``MEDIAPIPE_*`` env vars).
     """
-    _ = allow_model_download  # Reserved for parity with callers; model is loaded from disk.
-
-    landmarks = detect_landmarks(image_bgr)
+    landmarks = detect_landmarks(image_bgr, allow_model_download=allow_model_download)
 
     if landmarks is None:
         return {
