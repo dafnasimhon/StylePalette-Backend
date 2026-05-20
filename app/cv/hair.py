@@ -4,7 +4,7 @@ from typing import Any, Sequence, Tuple
 
 
 # -----------------------------
-# עזר: המרת נקודות לפיקסלים
+# Utilities: normalized landmark → pixel coordinates
 # -----------------------------
 def _landmark_xy(landmark: Any, w: int, h: int):
     x = int(landmark.x * w)
@@ -20,14 +20,14 @@ def _get_face_bounds(landmarks, w, h):
 
 
 # -----------------------------
-# יצירת אזור שיער (פשוט!)
+# Build rectangular hair ROI above the face bbox
 # -----------------------------
 def build_hair_region(image_bgr: np.ndarray, landmarks: Sequence[Any]):
     h, w = image_bgr.shape[:2]
 
     x_min, x_max, y_min, y_max = _get_face_bounds(landmarks, w, h)
 
-    # אזור מעל הפנים (שם נמצא השיער)
+    # Strip above face top edge (typical hair location)
     hair_top = max(0, y_min - int(0.3 * (y_max - y_min)))
 
     mask = np.zeros((h, w), dtype=np.uint8)
@@ -38,7 +38,7 @@ def build_hair_region(image_bgr: np.ndarray, landmarks: Sequence[Any]):
 
 
 # -----------------------------
-# חישוב צבע שיער (קצת יותר חכם)
+# Average hair color from ROI (robust to lighting)
 # -----------------------------
 def extract_hair_color(image_bgr: np.ndarray, mask: np.ndarray) -> Tuple[int, int, int]:
     pixels = image_bgr[mask > 0]
@@ -46,10 +46,30 @@ def extract_hair_color(image_bgr: np.ndarray, mask: np.ndarray) -> Tuple[int, in
     if len(pixels) == 0:
         raise ValueError("No hair pixels found")
 
-    # מסנן קצת רעש (מוריד קצוות)
-    pixels = pixels.astype(np.float32)
+    # HSV to separate strand color from outliers. Do NOT bias to the darkest
+    # pixels: that grabs roots/shadows and wrongly turns blonde hair "brown".
+    hsv = cv2.cvtColor(pixels.reshape((-1, 1, 3)), cv2.COLOR_BGR2HSV).reshape((-1, 3))
+    s = hsv[:, 1].astype(np.float32)
+    v = hsv[:, 2].astype(np.float32)
 
-    mean = np.mean(pixels, axis=0)
+    median_v = float(np.median(v))
+    if median_v >= 118:
+        # Bright ROI overall → blonde / light brown / highlighted hair: use mid–bright band.
+        v_lo = float(np.percentile(v, 28.0))
+        v_hi = float(np.percentile(v, 96.0))
+        hair_like = (v >= v_lo) & (v <= v_hi) & (s >= 8.0)
+    else:
+        # Darker hair: drop extreme highlights (sky/wall blowout) and deep shadow.
+        v_lo = float(np.percentile(v, 12.0))
+        v_hi = float(np.percentile(v, 88.0))
+        hair_like = (v >= v_lo) & (v <= v_hi) & (s >= 12.0)
+
+    if np.count_nonzero(hair_like) < 80:
+        hair_like = (v >= float(np.percentile(v, 18.0))) & (v <= float(np.percentile(v, 92.0)))
+
+    selected = pixels[hair_like] if np.count_nonzero(hair_like) > 0 else pixels
+    selected = selected.astype(np.float32)
+    mean = np.mean(selected, axis=0)
 
     b, g, r = int(mean[0]), int(mean[1]), int(mean[2])
 
@@ -57,7 +77,7 @@ def extract_hair_color(image_bgr: np.ndarray, mask: np.ndarray) -> Tuple[int, in
 
 
 # -----------------------------
-# פונקציה ראשית
+# Public entry
 # -----------------------------
 def get_hair_color(image_bgr: np.ndarray, landmarks: Sequence[Any]):
     mask = build_hair_region(image_bgr, landmarks)

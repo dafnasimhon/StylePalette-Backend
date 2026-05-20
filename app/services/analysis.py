@@ -82,11 +82,16 @@ def _bgr_hsv1(rgb: Tuple[int, int, int]) -> Tuple[int, int, int]:
 
 def classify_skin_tone_from_rgb(skin_rgb: Tuple[int, int, int]) -> str:
     lum = _relative_luminance(skin_rgb)
-    if lum >= 0.78:
+    r, g, b = skin_rgb
+    # Conservative thresholds: avoid over-lightening darker skin under highlights.
+    if lum >= 0.72:
         return "Very Fair"
-    if lum >= 0.55:
+    if lum >= 0.46:
         return "Fair"
-    if lum >= 0.32:
+    # Warm indoor light can lower luminance while channels still indicate fair skin.
+    if lum >= 0.34 and r >= 145 and g >= 120 and b >= 95:
+        return "Fair"
+    if lum >= 0.30:
         return "Medium/Tan"
     return "Dark"
 
@@ -96,20 +101,37 @@ def classify_hair_color_from_rgb(hair_rgb: Tuple[int, int, int]) -> str:
     s_f = s / 255.0
     v_f = v / 255.0
     r, g, b_ = (c / 255.0 for c in hair_rgb)
+    total = sum(hair_rgb)
+
+    # Strong blonde signal: bright, warm/yellow-ish, not deeply saturated brown.
+    if total >= 420 and v_f >= 0.42 and s_f <= 0.52 and h <= 55:
+        return "Blonde"
+    if total >= 400 and v_f >= 0.38 and s_f <= 0.45 and h <= 50:
+        return "Blonde"
 
     if v_f < 0.18 and s_f < 0.5:
         return "Black"
     if v_f < 0.12:
         return "Black"
 
-    is_red_hue = h <= 20 or h >= 165
-    if is_red_hue and s_f > 0.28 and v_f < 0.75:
-        if r > g * 0.95 or (r > 0.35 and (r - b_) > 0.05):
+    # Prefer blonde before red/ginger for bright low-saturation hair.
+    if v_f > 0.54 and s_f < 0.42 and 10 <= h <= 55:
+        return "Blonde"
+    if v_f > 0.66 and s_f < 0.46 and 8 <= h <= 60:
+        return "Blonde"
+
+    is_red_hue = h <= 10 or h >= 175
+    # Keep ginger/red very strict: only classify when hue, saturation and channel
+    # dominance all strongly indicate true red/copper hair.
+    if is_red_hue and 0.20 <= v_f <= 0.70 and s_f >= 0.50:
+        red_dominant = (r >= g * 1.20) and (r >= b_ * 1.28)
+        strong_red_delta = (r - g) >= 0.12 and (r - b_) >= 0.16 and r >= 0.32
+        if red_dominant or strong_red_delta:
             return "Red/Ginger"
 
-    if v_f > 0.5 and s_f < 0.45 and 12 <= h <= 60:
+    if v_f > 0.50 and s_f < 0.40 and 12 <= h <= 60:
         return "Blonde"
-    if v_f > 0.62 and s_f < 0.4 and 8 <= h <= 50:
+    if v_f > 0.62 and s_f < 0.36 and 8 <= h <= 50:
         return "Blonde"
 
     if v_f < 0.25:
@@ -120,15 +142,29 @@ def classify_hair_color_from_rgb(hair_rgb: Tuple[int, int, int]) -> str:
 
 def classify_eye_color_from_rgb(eye_rgb: Tuple[int, int, int]) -> str:
     r, g, b_ = eye_rgb
+    bgr_px = np.uint8([[[b_, g, r]]])
+    lab = cv2.cvtColor(bgr_px, cv2.COLOR_BGR2LAB)[0, 0]
+    ll, _a_lab, bb = float(lab[0]), float(lab[1]), float(lab[2])
+
     h, s, v = _bgr_hsv1(eye_rgb)
     s_f = s / 255.0
     b_f = b_ / 255.0
     g_f = g / 255.0
     r_f = r / 255.0
 
-    if b_f >= r_f + 0.06 and b_f >= g_f + 0.04 and s_f > 0.12:
+    # Lab b* (OpenCV 0–255, ~128 neutral): lower ⇒ more blue, higher ⇒ yellow.
+    if ll >= 48 and bb <= 128 and v >= 40 and not (52 <= h <= 88):
+        if b_ >= r - 6 or bb <= 120:
+            return "Blue"
+
+    # Hue-first blue detection to handle desaturated blue irises in studio lighting.
+    if 80 <= h <= 138 and v >= 35 and s >= 12:
         return "Blue"
-    if b_ > 95 and b_ > r and b_ > g and (b_ - max(r, g)) > 8:
+    if 70 <= h <= 150 and b_ >= g and b_ >= r and (b_ - r) >= 6:
+        return "Blue"
+    if b_f >= r_f + 0.04 and b_f >= g_f + 0.03 and s_f > 0.10:
+        return "Blue"
+    if b_ > 90 and b_ >= r + 4 and b_ >= g + 3:
         return "Blue"
 
     if g_f > r_f + 0.05 and g_f > b_f + 0.02 and 35 <= h <= 100 and s_f > 0.15:
